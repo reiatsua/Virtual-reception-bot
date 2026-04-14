@@ -1,6 +1,6 @@
 import asyncio
 import os
-from pathlib import Path
+import aiohttp  # <-- Новая библиотека для асинхронных запросов
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
@@ -9,10 +9,12 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemo
 load_dotenv()
 
 # --- НАСТРОЙКИ ---
-BOT_DIR = Path(__file__).resolve().parent
-FILE_PATH = BOT_DIR / os.getenv('ADMIN_CHAT_ID_FILE')
-TOKEN = os.getenv("RECEPTION_BOT_TOKEN") # Токен бота из .env
-ALLOWED_PHONE = os.getenv("ALLOWED_PHONE") # Укажи номер директора или секретаря
+TOKEN = os.getenv("RECEPTION_BOT_TOKEN") 
+ALLOWED_PHONE = os.getenv("ALLOWED_PHONE")
+
+# Новые переменные для связи с сайтом (которые мы пропишем в Railway)
+API_URL = os.getenv("WEBHOOK_API_URL") # например: https://flyceum-prod.up.railway.app/api/update-reception-id/
+SECRET_KEY = os.getenv("BOT_SECRET_KEY")
 # -----------------
 
 bot = Bot(token=TOKEN)
@@ -34,24 +36,45 @@ async def start_cmd(message: types.Message):
 
 @dp.message(F.contact)
 async def handle_contact(message: types.Message):
+    # Проверка: человек скинул свой контакт или переслал чужой?
+    if message.contact.user_id != message.from_user.id:
+        await message.answer("❌ Пожалуйста, отправьте свой собственный контакт через кнопку.", reply_markup=ReplyKeyboardRemove())
+        return
+
     phone = message.contact.phone_number
     
-    # Нормализуем номер (Телеграм иногда отдает номер без плюса)
+    # Нормализуем номер
     if not phone.startswith('+'):
         phone = '+' + phone
 
     if phone == ALLOWED_PHONE:
-        # Сохраняем ID чата в текстовый файл, чтобы Django знал, куда писать
-        with open(FILE_PATH, "w", encoding="utf-8") as f:
-            f.write(str(message.chat.id))
+        chat_id = message.chat.id
+        
+        # --- ОТПРАВЛЯЕМ ID НА САЙТ ---
+        payload = {
+            "chat_id": chat_id,
+            "secret_key": SECRET_KEY
+        }
+        
+        try:
+            # Асинхронно стучимся на твой сайт
+            async with aiohttp.ClientSession() as session:
+                async with session.post(API_URL, json=payload) as response:
+                    if response.status == 200:
+                        await message.answer("✅ Отлично! Ваш аккаунт привязан. Теперь обращения с сайта будут приходить сюда.", reply_markup=ReplyKeyboardRemove())
+                    else:
+                        error_text = await response.text()
+                        print(f"Ошибка от сайта: {error_text}")
+                        await message.answer("⚠️ Вы подтвердили номер, но произошла ошибка связи с сайтом. Обратитесь к разработчику.", reply_markup=ReplyKeyboardRemove())
+        except Exception as e:
+            print(f"Не смогли достучаться до сайта: {e}")
+            await message.answer("❌ Сервер сайта сейчас недоступен.", reply_markup=ReplyKeyboardRemove())
             
-        await message.answer("✅ Аккаунт приемной комиссии привязан успешно.", reply_markup=ReplyKeyboardRemove())
     else:
-        await message.answer("❌ Вы не являетесь приемной комиссией.", reply_markup=ReplyKeyboardRemove())
+        await message.answer("❌ Извините, этот номер не зарегистрирован как номер приемной комиссии.", reply_markup=ReplyKeyboardRemove())
 
 async def main():
     print("Бот запущен и ждет привязки...")
-    # Запуск асинхронного поллинга
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
